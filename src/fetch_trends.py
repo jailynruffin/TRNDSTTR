@@ -1,17 +1,28 @@
 # src/fetch_trends.py
 from datetime import datetime
 from pathlib import Path
-import time, random
+import time, random, tempfile
 import pandas as pd
 from sqlalchemy import create_engine, text
 from sqlalchemy.types import Integer, Float, String, DateTime
 from pytrends.request import TrendReq
 from pytrends import exceptions as pt_exc
 
-DATA_DIR = Path("/mount/data")
+def _choose_data_dir():
+    for p in (Path("/mount/data"), Path(tempfile.gettempdir()) / "trndsttr"):
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+            return p
+        except PermissionError:
+            continue
+    fallback = Path(tempfile.gettempdir()) / "trndsttr"
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
+
+DATA_DIR = _choose_data_dir()
 RAW_DIR = DATA_DIR / "data" / "raw"
 PROC_DIR = DATA_DIR / "data" / "processed"
-for d in (DATA_DIR, RAW_DIR, PROC_DIR):
+for d in (RAW_DIR, PROC_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 DB_URL = f"sqlite:///{(DATA_DIR / 'trndsttr.sqlite')}"
