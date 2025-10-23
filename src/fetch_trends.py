@@ -3,11 +3,35 @@ from datetime import datetime
 from pathlib import Path
 import time, random
 import pandas as pd
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
+from sqlalchemy.types import Integer, Float, String, DateTime
 from pytrends.request import TrendReq
 from pytrends import exceptions as pt_exc
 
-DB_URL = "sqlite:///db/trends.db"
+DATA_DIR = Path("/mount/data")
+RAW_DIR = DATA_DIR / "data" / "raw"
+PROC_DIR = DATA_DIR / "data" / "processed"
+for d in (DATA_DIR, RAW_DIR, PROC_DIR):
+    d.mkdir(parents=True, exist_ok=True)
+
+DB_URL = f"sqlite:///{(DATA_DIR / 'trndsttr.sqlite')}"
+engine = create_engine(DB_URL, future=True)
+
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS topics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    keyword TEXT NOT NULL,
+    date_ts INTEGER NOT NULL,
+    interest REAL,
+    fetched_at TIMESTAMP NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_topics_date ON topics(date_ts);
+CREATE INDEX IF NOT EXISTS idx_topics_kw_date ON topics(keyword, date_ts);
+"""
+with engine.begin() as conn:
+    for stmt in SCHEMA_SQL.strip().split(";"):
+        if stmt.strip():
+            conn.exec_driver_sql(stmt)
 
 def _interest_over_time_once(keywords, timeframe, geo):
     pytrends = TrendReq(hl="en-US", tz=0)
@@ -35,7 +59,7 @@ def fetch_interest_over_time(keywords, timeframe="today 3-m", geo="US"):
     if not keywords:
         return pd.DataFrame()
 
-    # pytrends supports up to 5 keywords per payload reliably
+    # up to 5 keywords per payload reliably
     chunks = [keywords[i:i+5] for i in range(0, len(keywords), 5)]
     frames = []
     for chunk in chunks:
@@ -46,6 +70,11 @@ def fetch_interest_over_time(keywords, timeframe="today 3-m", geo="US"):
         if "isPartial" in df.columns:
             df = df.drop(columns=["isPartial"])
         long_df = df.melt(id_vars=["date_ts"], var_name="keyword", value_name="interest")
+        long_df["date_ts"] = pd.to_datetime(long_df["date_ts"], utc=True, errors="coerce")
+        long_df = long_df.dropna(subset=["date_ts"])
+        long_df["date_ts"] = (long_df["date_ts"].view("int64") // 10**9).astype("int64")
+        long_df["keyword"] = long_df["keyword"].astype("string")
+        long_df["interest"] = pd.to_numeric(long_df["interest"], errors="coerce")
         long_df["fetched_at"] = pd.Timestamp.utcnow()
         frames.append(long_df)
 
@@ -56,17 +85,22 @@ def fetch_interest_over_time(keywords, timeframe="today 3-m", geo="US"):
     long_df = long_df.drop_duplicates(subset=["date_ts", "keyword"])
 
     # Ensure folders exist
-    Path("db").mkdir(parents=True, exist_ok=True)
-    Path("data/raw").mkdir(parents=True, exist_ok=True)
-    Path("data/processed").mkdir(parents=True, exist_ok=True)
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
+    PROC_DIR.mkdir(parents=True, exist_ok=True)
 
     # Snapshots
     ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    # Save one representative raw/processed snapshot (optional)
-    long_df.to_csv(f"data/processed/google_trends_long_{ts}.csv", index=False)
+    # Save one representative raw/processed snapshot 
+    long_df.to_csv(PROC_DIR / f"google_trends_long_{ts}.csv", index=False)
 
     # Persist to SQLite
-    engine = create_engine(DB_URL, future=True)
-    long_df.to_sql("topics", engine, if_exists="append", index=False)
+    dtype = {
+        "keyword": String(),
+        "date_ts": Integer(),
+        "interest": Float(),
+        "fetched_at": DateTime(timezone=False),
+    }
+    long_df.to_sql("topics", engine, if_exists="append", index=False, dtype=dtype, method="multi", chunksize=1000)
 
     return long_df
+
