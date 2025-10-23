@@ -10,7 +10,10 @@ def distinct_keywords():
 
 def max_timestamp():
     with engine.begin() as conn:
-        return pd.to_datetime(conn.execute(text("SELECT MAX(date_ts) FROM topics")).scalar())
+        ts = conn.execute(text("SELECT MAX(date_ts) FROM topics")).scalar()
+    if ts is None:
+        return pd.NaT
+    return pd.to_datetime(ts, unit="s", utc=True, errors="coerce")
 
 def _in_clause(keys):
     # returns (sql, params) e.g. "(:k0,:k1)" and {"k0": "...", "k1": "..."}
